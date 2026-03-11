@@ -10,8 +10,8 @@ from logging.handlers import RotatingFileHandler
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.filters import Command, CommandStart
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 from config import config
@@ -62,6 +62,17 @@ def _format_result(result: FactCheckResult) -> str:
     )
 
 
+def _main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="/check"), KeyboardButton(text="/help")],
+            [KeyboardButton(text="/about"), KeyboardButton(text="/start")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Введите новость или выберите команду",
+    )
+
+
 def _extract_text(message: Message) -> str:
     return (message.text or message.caption or "").strip()
 
@@ -106,23 +117,59 @@ async def _analyze_and_respond(
 
 async def handle_start(message: Message) -> None:
     await message.answer(
-        "Отправьте новость, и я проверю, насколько она похожа на правду или фейк."
+        "Привет! 👋\n\n"
+        "Я бот для проверки новостей.\n\n"
+        "Просто перешли мне сообщение, новость или ссылку — "
+        "я проанализирую её и покажу результат проверки и источники.",
+        reply_markup=_main_keyboard(),
+    )
+
+
+async def handle_help(message: Message) -> None:
+    await message.answer(
+        "Как пользоваться ботом:\n\n"
+        "1️⃣ Перешли новость или сообщение\n"
+        "2️⃣ Отправь ссылку на статью\n"
+        "3️⃣ Напиши текст, который хочешь проверить\n\n"
+        "Бот проанализирует информацию и покажет результат проверки.",
+        reply_markup=_main_keyboard(),
+    )
+
+
+async def handle_about(message: Message) -> None:
+    await message.answer(
+        "Этот бот анализирует новости и сообщения, "
+        "чтобы определить их достоверность.\n\n"
+        "Отправь текст или ссылку — и бот проверит информацию.",
+        reply_markup=_main_keyboard(),
+    )
+
+
+async def handle_check(message: Message) -> None:
+    await message.answer(
+        "Отправь новость, сообщение или ссылку — "
+        "я попробую проверить её достоверность.",
+        reply_markup=_main_keyboard(),
     )
 
 
 async def handle_any(message: Message) -> None:
     text = _extract_text(message)
 
-    if message.text and message.text.startswith("/start"):
-        return
-
     if message.text and message.text.startswith("/"):
-        await message.answer("Отправьте текст новости для проверки.")
+        command = message.text.split()[0].lower()
+        if command in {"/start", "/help", "/about", "/check"}:
+            return
+        await message.answer(
+            "Отправьте текст новости для проверки.",
+            reply_markup=_main_keyboard(),
+        )
         return
 
     if _is_too_short(text):
         await message.answer(
-            "Пожалуйста, отправьте текст новости или подпись к пересланному сообщению."
+            "Пожалуйста, отправьте текст новости или подпись к пересланному сообщению.",
+            reply_markup=_main_keyboard(),
         )
         return
 
@@ -209,6 +256,9 @@ async def main() -> None:
     dp = Dispatcher()
 
     dp.message.register(handle_start, CommandStart())
+    dp.message.register(handle_help, Command("help"))
+    dp.message.register(handle_about, Command("about"))
+    dp.message.register(handle_check, Command("check"))
     dp.message.register(handle_any)
 
     if config.webhook_base_url:
