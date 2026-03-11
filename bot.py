@@ -100,14 +100,11 @@ ABOUT_TRIGGERS = {"о боте", "ℹ️ о боте"}
 START_TRIGGERS = {"старт", "▶️ старт"}
 MENU_TRIGGERS = {"меню", "📋 меню"}
 
-GREETING_TRIGGERS = {
+GREETING_WORDS = {
     "привет",
     "приветик",
     "здравствуйте",
     "здравствуй",
-    "добрый день",
-    "добрый вечер",
-    "доброе утро",
     "хай",
     "хелло",
     "hello",
@@ -116,17 +113,38 @@ GREETING_TRIGGERS = {
     "ку",
 }
 
-SMALLTALK_TRIGGERS = {
-    "как дела",
-    "как ты",
-    "что делаешь",
+GREETING_PHRASES = {
+    "добрый день",
+    "добрый вечер",
+    "доброе утро",
+}
+
+GREETING_TAIL_WORDS = {
+    "бот",
+    "ботик",
+    "друг",
+    "друзья",
+    "всем",
+    "чат",
+    "чатбот",
+}
+
+SMALLTALK_WORDS = {
     "спасибо",
     "благодарю",
     "понял",
     "понятно",
+    "ясно",
     "ок",
     "окей",
-    "ясно",
+}
+
+SMALLTALK_PHRASES = {
+    "как дела",
+    "как ты",
+    "что делаешь",
+    "что нового",
+    "как у тебя дела",
 }
 
 
@@ -234,21 +252,31 @@ def _looks_like_greeting(text: str) -> bool:
     normalized = _normalize_free_text(text)
     if not normalized:
         return False
-    if normalized in GREETING_TRIGGERS:
+    if normalized in GREETING_PHRASES or normalized in GREETING_WORDS:
         return True
     words = normalized.split()
-    if len(words) > 2:
+    if not words or len(words) > 3:
         return False
-    return all(word in GREETING_TRIGGERS for word in words)
+    if words[0] not in GREETING_WORDS:
+        return False
+    return all(word in GREETING_TAIL_WORDS for word in words[1:])
 
 
 def _looks_like_smalltalk(text: str) -> bool:
     normalized = _normalize_free_text(text)
     if not normalized:
         return False
-    if len(normalized.split()) > 4:
+    words = normalized.split()
+    if len(words) > 6:
         return False
-    return any(trigger in normalized for trigger in SMALLTALK_TRIGGERS)
+    if normalized in SMALLTALK_PHRASES:
+        return True
+    for phrase in SMALLTALK_PHRASES:
+        if phrase in normalized:
+            return True
+    if not words:
+        return False
+    return words[0] in SMALLTALK_WORDS
 
 
 def _section_banner(state_name: str | None) -> str:
@@ -518,11 +546,14 @@ async def _send_top_news_message(
             "⚠️ Не удалось получить новости по теме. Попробуйте позже.",
             state_name,
         )
-        await message.bot.edit_message_text(
-            text=text,
-            chat_id=message.chat.id,
-            message_id=status_message.message_id,
-        )
+        try:
+            await message.bot.edit_message_text(
+                text=text,
+                chat_id=message.chat.id,
+                message_id=status_message.message_id,
+            )
+        except TelegramBadRequest:
+            await message.answer(text, reply_markup=_main_keyboard())
         return
 
     text = _with_section_banner(_format_news_items(items, topic), state_name)
@@ -740,9 +771,11 @@ async def handle_any(message: Message) -> None:
 
     if (
         user
-        and _is_short_message(text)
         and not _contains_url(text)
-        and (_looks_like_greeting(text) or _looks_like_smalltalk(text))
+        and (
+            (_is_short_message(text) and _looks_like_greeting(text))
+            or _looks_like_smalltalk(text)
+        )
     ):
         await message.answer(
             "Привет! Чем могу помочь?\n"
