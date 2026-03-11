@@ -299,6 +299,12 @@ def _extract_text(message: Message) -> str:
     return (message.text or message.caption or "").strip()
 
 
+def _is_owner(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    return user_id in config.owner_ids
+
+
 def _track_task(task: asyncio.Task) -> None:
     BACKGROUND_TASKS.add(task)
 
@@ -746,7 +752,7 @@ async def handle_any(message: Message) -> None:
 
     now = datetime.now(timezone.utc)
     active_until = _get_active_subscription(user.id, now)
-    if not active_until:
+    if not active_until and not _is_owner(user.id):
         day_key = _today_key(now)
         used = get_usage_count(user.id, day_key)
         if used >= config.daily_limit:

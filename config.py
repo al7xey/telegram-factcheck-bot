@@ -28,6 +28,7 @@ class Config:
     min_text_chars: int
     min_text_words: int
     daily_limit: int
+    owner_ids: set[int]
     subscription_stars: int
     subscription_days: int
     payment_provider_token: str
@@ -94,6 +95,18 @@ def load_config() -> Config:
     render_port = _get_int("PORT", 0)
     webhook_port = render_port or _get_int("WEBHOOK_PORT", 8080)
 
+    owner_ids_raw = os.getenv("OWNER_IDS", "").strip()
+    owner_ids: set[int] = set()
+    if owner_ids_raw:
+        for chunk in owner_ids_raw.split(","):
+            value = chunk.strip()
+            if not value:
+                continue
+            try:
+                owner_ids.add(int(value))
+            except ValueError:
+                continue
+
     return Config(
         telegram_bot_token=telegram_bot_token,
         gigachat_api_key=gigachat_api_key,
@@ -112,6 +125,7 @@ def load_config() -> Config:
         min_text_chars=_get_int("MIN_TEXT_CHARS", 30),
         min_text_words=_get_int("MIN_TEXT_WORDS", 4),
         daily_limit=_get_int("DAILY_LIMIT", 5),
+        owner_ids=owner_ids,
         subscription_stars=_get_int("SUBSCRIPTION_STARS", 50),
         subscription_days=_get_int("SUBSCRIPTION_DAYS", 30),
         payment_provider_token=os.getenv("PAYMENT_PROVIDER_TOKEN", "").strip(),
