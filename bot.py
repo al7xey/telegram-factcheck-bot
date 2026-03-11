@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 
@@ -62,6 +63,10 @@ BACKGROUND_TASKS: set[asyncio.Task] = set()
 SUBSCRIPTION_PAYLOAD = "subscription_month_unlimited_v1"
 STATE_AWAITING_QUESTION = "awaiting_question"
 STATE_AWAITING_TOPIC = "awaiting_topic"
+SECTION_TITLES = {
+    STATE_AWAITING_QUESTION: "Вопрос по последней новости",
+    STATE_AWAITING_TOPIC: "Топ-5 новостей по теме",
+}
 BUTTON_CHECK = "✅ Проверка"
 BUTTON_SUBSCRIBE = "⭐ Подписка"
 BUTTON_QUESTION = "❓ Вопрос"
@@ -94,6 +99,35 @@ HELP_TRIGGERS = {"помощь", "🆘 помощь"}
 ABOUT_TRIGGERS = {"о боте", "ℹ️ о боте"}
 START_TRIGGERS = {"старт", "▶️ старт"}
 MENU_TRIGGERS = {"меню", "📋 меню"}
+
+GREETING_TRIGGERS = {
+    "привет",
+    "приветик",
+    "здравствуйте",
+    "здравствуй",
+    "добрый день",
+    "добрый вечер",
+    "доброе утро",
+    "хай",
+    "хелло",
+    "hello",
+    "hi",
+    "йо",
+    "ку",
+}
+
+SMALLTALK_TRIGGERS = {
+    "как дела",
+    "как ты",
+    "что делаешь",
+    "спасибо",
+    "благодарю",
+    "понял",
+    "понятно",
+    "ок",
+    "окей",
+    "ясно",
+}
 
 
 def _is_too_short(text: str) -> bool:
@@ -176,6 +210,46 @@ def _extract_question(text: str) -> str | None:
 
 def _normalize_trigger(text: str) -> str:
     return " ".join(text.strip().casefold().split())
+
+
+def _normalize_free_text(text: str) -> str:
+    cleaned = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
+    return " ".join(cleaned.casefold().split())
+
+
+def _looks_like_greeting(text: str) -> bool:
+    normalized = _normalize_free_text(text)
+    if not normalized:
+        return False
+    if normalized in GREETING_TRIGGERS:
+        return True
+    words = normalized.split()
+    return any(word in GREETING_TRIGGERS for word in words)
+
+
+def _looks_like_smalltalk(text: str) -> bool:
+    normalized = _normalize_free_text(text)
+    if not normalized:
+        return False
+    if len(normalized.split()) > 4:
+        return False
+    return any(trigger in normalized for trigger in SMALLTALK_TRIGGERS)
+
+
+def _section_banner(state_name: str | None) -> str:
+    if not state_name:
+        return ""
+    title = SECTION_TITLES.get(state_name)
+    if not title:
+        return ""
+    return f"🧭 Сейчас вы в разделе: {title}."
+
+
+def _with_section_banner(text: str, state_name: str | None) -> str:
+    banner = _section_banner(state_name)
+    if not banner:
+        return text
+    return f"{banner}\n\n{text}"
 
 
 def _menu_text() -> str:
@@ -335,14 +409,20 @@ async def handle_check(message: Message) -> None:
     if message.from_user:
         clear_state(message.from_user.id)
     await message.answer(
-        "✅ Отправь новость, сообщение или ссылку — "
-        "я попробую проверить её достоверность.\n\n"
-        "❓ После проверки можно задать вопрос по этой новости.",
+        "✅ Проверка новости\n\n"
+        "Отправьте текст новости или ссылку на статью.\n"
+        "Пример: «В городе N открыли новый завод…»\n\n"
+        "❓ После проверки можно задать вопрос по этой новости.\n"
+        "Для выхода напишите «меню».",
         reply_markup=_main_keyboard(),
     )
 
 
-async def _answer_question_message(message: Message, question: str) -> None:
+async def _answer_question_message(
+    message: Message,
+    question: str,
+    state_name: str | None = None,
+) -> None:
     user = message.from_user
     if not user:
         await message.answer("⚠️ Не удалось определить пользователя.")
@@ -351,23 +431,32 @@ async def _answer_question_message(message: Message, question: str) -> None:
     cleaned = question.strip()
     if len(cleaned) < 3:
         set_state(user.id, STATE_AWAITING_QUESTION)
-        await message.answer(
-            "📝 Сформулируйте вопрос чуть подробнее.",
-            reply_markup=_main_keyboard(),
+        text = _with_section_banner(
+            "📝 Сформулируйте вопрос чуть подробнее.\n"
+            "Пример: «Кто упомянут в новости и когда это произошло?»\n"
+            "Для выхода напишите «меню».",
+            STATE_AWAITING_QUESTION,
         )
+        await message.answer(text, reply_markup=_main_keyboard())
         return
 
     last_news = get_last_news(user.id)
     if not last_news:
-        await message.answer(
+        text = (
             "⚠️ Сначала отправьте новость для проверки — "
-            "тогда я смогу отвечать на вопросы по ней.",
+            "тогда я смогу отвечать на вопросы по ней."
+        )
+        await message.answer(
+            _with_section_banner(text, state_name),
             reply_markup=_main_keyboard(),
         )
         return
 
     status_message = await message.answer(
-        "⏳ Отвечаю на вопрос по последней новости. Пожалуйста, подождите."
+        _with_section_banner(
+            "⏳ Отвечаю на вопрос по последней новости. Пожалуйста, подождите.",
+            state_name,
+        )
     )
     try:
         answer = await asyncio.to_thread(answer_question, last_news, cleaned)
@@ -375,6 +464,7 @@ async def _answer_question_message(message: Message, question: str) -> None:
         logger.exception("Question answering failed")
         answer = "⚠️ Извините, сейчас не удалось ответить на вопрос. Попробуйте позже."
 
+    answer = _with_section_banner(answer, state_name)
     try:
         await message.bot.edit_message_text(
             text=answer,
@@ -385,9 +475,16 @@ async def _answer_question_message(message: Message, question: str) -> None:
         await message.answer(answer, reply_markup=_main_keyboard())
 
 
-async def _send_top_news_message(message: Message, topic: str | None) -> None:
+async def _send_top_news_message(
+    message: Message,
+    topic: str | None,
+    state_name: str | None = None,
+) -> None:
     status_message = await message.answer(
-        "📰 Собираю топ-5 новостей. Пожалуйста, подождите."
+        _with_section_banner(
+            "📰 Собираю топ-5 новостей. Пожалуйста, подождите.",
+            state_name,
+        )
     )
     try:
         items = await asyncio.to_thread(fetch_top_news, topic, 5)
@@ -396,14 +493,18 @@ async def _send_top_news_message(message: Message, topic: str | None) -> None:
         items = []
 
     if not items:
+        text = _with_section_banner(
+            "⚠️ Не удалось получить новости по теме. Попробуйте позже.",
+            state_name,
+        )
         await message.bot.edit_message_text(
-            text="⚠️ Не удалось получить новости по теме. Попробуйте позже.",
+            text=text,
             chat_id=message.chat.id,
             message_id=status_message.message_id,
         )
         return
 
-    text = _format_news_items(items, topic)
+    text = _with_section_banner(_format_news_items(items, topic), state_name)
     try:
         await message.bot.edit_message_text(
             text=text,
@@ -431,10 +532,13 @@ async def handle_question(message: Message) -> None:
         return
 
     set_state(user.id, STATE_AWAITING_QUESTION)
-    await message.answer(
-        "❓ Напишите вопрос по последней новости.",
-        reply_markup=_main_keyboard(),
+    text = _with_section_banner(
+        "❓ Напишите вопрос по последней новости.\n"
+        "Пример: «Кто упомянут в новости и когда это произошло?»\n"
+        "Для выхода напишите «меню».",
+        STATE_AWAITING_QUESTION,
     )
+    await message.answer(text, reply_markup=_main_keyboard())
 
 
 async def handle_top_news(message: Message) -> None:
@@ -442,11 +546,14 @@ async def handle_top_news(message: Message) -> None:
     if user:
         clear_state(user.id)
         set_state(user.id, STATE_AWAITING_TOPIC)
-    await message.answer(
-        "📰 Напишите тему для топ-5 новостей. "
-        "Если нужна подборка без темы — отправьте «без темы».",
-        reply_markup=_main_keyboard(),
+    text = _with_section_banner(
+        "📰 Напишите тему для топ-5 новостей.\n"
+        "Например: «технологии», «спорт», «экономика».\n"
+        "Если нужна подборка без темы — отправьте «без темы».\n"
+        "Для выхода напишите «меню».",
+        STATE_AWAITING_TOPIC,
     )
+    await message.answer(text, reply_markup=_main_keyboard())
 
 
 async def handle_subscribe(message: Message) -> None:
@@ -598,11 +705,11 @@ async def handle_any(message: Message) -> None:
             state_name, _payload = state
             clear_state(user.id)
             if state_name == STATE_AWAITING_QUESTION:
-                await _answer_question_message(message, text)
+                await _answer_question_message(message, text, state_name=state_name)
                 return
             if state_name == STATE_AWAITING_TOPIC:
                 topic = _normalize_topic(text)
-                await _send_top_news_message(message, topic)
+                await _send_top_news_message(message, topic, state_name=state_name)
                 return
 
     question = _extract_question(text)
@@ -610,10 +717,22 @@ async def handle_any(message: Message) -> None:
         await _answer_question_message(message, question)
         return
 
+    if user and (_looks_like_greeting(text) or _looks_like_smalltalk(text)):
+        await message.answer(
+            "Привет! Чем могу помочь?\n"
+            "✅ Проверка новости\n"
+            "❓ Вопрос по последней новости\n"
+            "📰 Топ-5 новостей по теме\n\n"
+            "Выберите раздел кнопками или отправьте /menu.",
+            reply_markup=_main_keyboard(),
+        )
+        return
+
     if _is_too_short(text):
         await message.answer(
-            "⚠️ Пожалуйста, отправьте текст новости (минимум 4 слова) "
-            "или подпись к пересланному сообщению.",
+            "Похоже, это короткое сообщение.\n"
+            "Если хотите проверить новость — пришлите текст или ссылку.\n"
+            "Можно выбрать раздел кнопками или отправить /menu.",
             reply_markup=_main_keyboard(),
         )
         return
