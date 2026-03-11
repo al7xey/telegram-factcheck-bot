@@ -13,6 +13,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -61,7 +62,21 @@ BACKGROUND_TASKS: set[asyncio.Task] = set()
 SUBSCRIPTION_PAYLOAD = "subscription_month_unlimited_v1"
 STATE_AWAITING_QUESTION = "awaiting_question"
 STATE_AWAITING_TOPIC = "awaiting_topic"
+BUTTON_CHECK = "✅ Проверка"
+BUTTON_SUBSCRIBE = "⭐ Подписка"
+BUTTON_QUESTION = "❓ Вопрос"
+BUTTON_TOP = "📰 Топ новости"
+BUTTON_HELP = "🆘 Помощь"
+BUTTON_ABOUT = "ℹ️ О боте"
+BUTTON_START = "▶️ Старт"
 BUTTON_TEXTS = {
+    BUTTON_CHECK,
+    BUTTON_SUBSCRIBE,
+    BUTTON_QUESTION,
+    BUTTON_TOP,
+    BUTTON_HELP,
+    BUTTON_ABOUT,
+    BUTTON_START,
     "Проверка",
     "Подписка",
     "Помощь",
@@ -70,6 +85,15 @@ BUTTON_TEXTS = {
     "Топ новости",
     "Старт",
 }
+
+CHECK_TRIGGERS = {"проверка", "✅ проверка"}
+SUBSCRIBE_TRIGGERS = {"подписка", "⭐ подписка"}
+QUESTION_TRIGGERS = {"вопрос", "❓ вопрос"}
+TOP_TRIGGERS = {"топ новости", "📰 топ новости", "топ"}
+HELP_TRIGGERS = {"помощь", "🆘 помощь"}
+ABOUT_TRIGGERS = {"о боте", "ℹ️ о боте"}
+START_TRIGGERS = {"старт", "▶️ старт"}
+MENU_TRIGGERS = {"меню", "📋 меню"}
 
 
 def _is_too_short(text: str) -> bool:
@@ -89,20 +113,20 @@ def _format_result(result: FactCheckResult) -> str:
     sources_block = "\n".join(f"{idx + 1}. {src}" for idx, src in enumerate(sources))
 
     return (
-        "Проверка фактов\n\n"
-        f"Вердикт: {result.verdict}\n\n"
-        f"Уверенность: {result.confidence}%\n\n"
-        "Обоснование:\n"
+        "✅ Проверка фактов\n\n"
+        f"📌 Вердикт: {result.verdict}\n\n"
+        f"🎯 Уверенность: {result.confidence}%\n\n"
+        "🧾 Обоснование:\n"
         f"{reasoning_block}\n\n"
-        "Источники:\n"
+        "🔗 Источники:\n"
         f"{sources_block}"
     )
 
 
 def _subscription_info() -> str:
     return (
-        f"Лимит без подписки: {config.daily_limit} новостей в день.\n"
-        f"Подписка: {config.subscription_stars} ⭐️ на {config.subscription_days} дней безлимита "
+        f"📊 Лимит без подписки: {config.daily_limit} новостей в день.\n"
+        f"⭐ Подписка: {config.subscription_stars} ⭐️ на {config.subscription_days} дней безлимита "
         "(кнопка «Подписка»)."
     )
 
@@ -150,18 +174,37 @@ def _extract_question(text: str) -> str | None:
     return None
 
 
+def _normalize_trigger(text: str) -> str:
+    return " ".join(text.strip().casefold().split())
+
+
+def _menu_text() -> str:
+    return (
+        "📋 Меню разделов\n\n"
+        "✅ /check — проверить новость\n"
+        "❓ /question — вопрос по последней новости\n"
+        "📰 /top — топ-5 новостей по теме\n"
+        "⭐ /subscribe — подписка и лимиты\n"
+        "🆘 /help — помощь\n"
+        "ℹ️ /about — о боте\n"
+        "▶️ /start — старт\n"
+        "📋 /menu — показать это меню\n\n"
+        "Можно использовать кнопки ниже."
+    )
+
+
 def _format_news_items(items: list[NewsItem], topic: str | None) -> str:
-    header = "Топ-5 новостей"
+    header = "📰 Топ-5 новостей"
     if topic:
         header = f"{header} по теме: {topic}"
     lines = [header, ""]
     for idx, item in enumerate(items, start=1):
         lines.append(f"{idx}. {item.title}")
         if item.summary:
-            lines.append(item.summary)
+            lines.append(f"📝 {item.summary}")
         if item.source:
-            lines.append(f"Источник: {item.source}")
-        lines.append(item.link)
+            lines.append(f"🗞️ Источник: {item.source}")
+        lines.append(f"🔗 {item.link}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -169,12 +212,12 @@ def _format_news_items(items: list[NewsItem], topic: str | None) -> str:
 def _main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Проверка"), KeyboardButton(text="Подписка")],
-            [KeyboardButton(text="Вопрос"), KeyboardButton(text="Топ новости")],
-            [KeyboardButton(text="Помощь"), KeyboardButton(text="О боте")],
+            [KeyboardButton(text=BUTTON_CHECK), KeyboardButton(text=BUTTON_SUBSCRIBE)],
+            [KeyboardButton(text=BUTTON_QUESTION), KeyboardButton(text=BUTTON_TOP)],
+            [KeyboardButton(text=BUTTON_HELP), KeyboardButton(text=BUTTON_ABOUT)],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Введите новость, вопрос или тему",
+        input_field_placeholder="Введите новость, вопрос или тему ✍️",
     )
 
 
@@ -225,13 +268,18 @@ async def handle_start(message: Message) -> None:
         clear_state(message.from_user.id)
     await message.answer(
         "Привет! 👋\n\n"
-        "Я бот для проверки новостей.\n\n"
-        "Просто перешли мне сообщение, новость или ссылку — "
-        "я проанализирую её и покажу результат проверки и источники.\n\n"
+        "Я бот для проверки новостей и сообщений 🔎\n\n"
+        "Как это работает:\n"
+        "1️⃣ Ты присылаешь текст или ссылку\n"
+        "2️⃣ Я анализирую и даю вердикт\n"
+        "3️⃣ Показываю краткое обоснование и источники\n\n"
+        "🔗 Источники всегда даю прямыми ссылками (без Google/Google News).\n"
+        "🧠 Я не заменяю журналистские расследования — проверяю по доступным данным.\n\n"
         "Можно задать вопрос по последней новости (кнопка «Вопрос»).\n"
-        "Также доступен «Топ новости» — отправь тему и получишь подборку.\n\n"
+        "Также доступен «Топ новости» — отправь тему и получишь подборку.\n"
+        "📋 /menu — список разделов и команд.\n\n"
         f"{_subscription_info()}\n\n"
-        "Если бот долго не отвечает, подождите до 50 секунд — "
+        "⏳ Если бот долго не отвечает, подождите до 50 секунд — "
         "иногда требуется время на запуск.",
         reply_markup=_main_keyboard(),
     )
@@ -241,15 +289,17 @@ async def handle_help(message: Message) -> None:
     if message.from_user:
         clear_state(message.from_user.id)
     await message.answer(
-        "Как пользоваться ботом:\n\n"
+        "🆘 Как пользоваться ботом:\n\n"
         "1️⃣ Перешли новость или сообщение\n"
         "2️⃣ Отправь ссылку на статью\n"
         "3️⃣ Напиши текст, который хочешь проверить\n\n"
-        "Бот проанализирует информацию и покажет результат проверки.\n\n"
-        "Вопрос по последней новости — кнопка «Вопрос».\n"
-        "Подборка по теме — кнопка «Топ новости».\n\n"
+        "✅ Я проанализирую информацию и покажу результат проверки.\n"
+        "🔗 Источники будут прямыми ссылками на первоисточники.\n\n"
+        "❓ Вопрос по последней новости — кнопка «Вопрос».\n"
+        "📰 Подборка по теме — кнопка «Топ новости».\n"
+        "📋 /menu — список команд и разделов.\n\n"
         f"{_subscription_info()}\n\n"
-        "Если бот долго не отвечает, подожди до 50 секунд — "
+        "⏳ Если бот долго не отвечает, подожди до 50 секунд — "
         "иногда требуется время на запуск.",
         reply_markup=_main_keyboard(),
     )
@@ -259,25 +309,35 @@ async def handle_about(message: Message) -> None:
     if message.from_user:
         clear_state(message.from_user.id)
     await message.answer(
+        "ℹ️ О боте\n\n"
         "Этот бот анализирует новости и сообщения, "
-        "чтобы определить их достоверность.\n\n"
-        "Отправь текст или ссылку — и бот проверит информацию.\n\n"
-        "Можно задать вопрос по последней новости и получить подборку "
-        "«Топ новости» по интересующей теме.\n\n"
+        "чтобы помочь понять их достоверность. 🔎\n\n"
+        "✅ Отправь текст или ссылку — и бот проверит информацию.\n"
+        "🔗 Источники всегда даются прямыми ссылками (без Google/Google News).\n"
+        "🧠 Бот не заменяет экспертную проверку — он помогает быстро сориентироваться.\n\n"
+        "❓ Можно задать вопрос по последней новости.\n"
+        "📰 Можно получить подборку «Топ новости» по интересующей теме.\n"
+        "📋 /menu — список команд и разделов.\n\n"
         f"{_subscription_info()}\n\n"
-        "Если бот долго не отвечает, подожди до 50 секунд — "
+        "⏳ Если бот долго не отвечает, подожди до 50 секунд — "
         "иногда требуется время на запуск.",
         reply_markup=_main_keyboard(),
     )
+
+
+async def handle_menu(message: Message) -> None:
+    if message.from_user:
+        clear_state(message.from_user.id)
+    await message.answer(_menu_text(), reply_markup=_main_keyboard())
 
 
 async def handle_check(message: Message) -> None:
     if message.from_user:
         clear_state(message.from_user.id)
     await message.answer(
-        "Отправь новость, сообщение или ссылку — "
+        "✅ Отправь новость, сообщение или ссылку — "
         "я попробую проверить её достоверность.\n\n"
-        "После проверки можно задать вопрос по этой новости.",
+        "❓ После проверки можно задать вопрос по этой новости.",
         reply_markup=_main_keyboard(),
     )
 
@@ -285,14 +345,14 @@ async def handle_check(message: Message) -> None:
 async def _answer_question_message(message: Message, question: str) -> None:
     user = message.from_user
     if not user:
-        await message.answer("Не удалось определить пользователя.")
+        await message.answer("⚠️ Не удалось определить пользователя.")
         return
 
     cleaned = question.strip()
     if len(cleaned) < 3:
         set_state(user.id, STATE_AWAITING_QUESTION)
         await message.answer(
-            "Сформулируйте вопрос чуть подробнее.",
+            "📝 Сформулируйте вопрос чуть подробнее.",
             reply_markup=_main_keyboard(),
         )
         return
@@ -300,20 +360,20 @@ async def _answer_question_message(message: Message, question: str) -> None:
     last_news = get_last_news(user.id)
     if not last_news:
         await message.answer(
-            "Сначала отправьте новость для проверки — "
+            "⚠️ Сначала отправьте новость для проверки — "
             "тогда я смогу отвечать на вопросы по ней.",
             reply_markup=_main_keyboard(),
         )
         return
 
     status_message = await message.answer(
-        "Отвечаю на вопрос по последней новости. Пожалуйста, подождите."
+        "⏳ Отвечаю на вопрос по последней новости. Пожалуйста, подождите."
     )
     try:
         answer = await asyncio.to_thread(answer_question, last_news, cleaned)
     except Exception:
         logger.exception("Question answering failed")
-        answer = "Извините, сейчас не удалось ответить на вопрос. Попробуйте позже."
+        answer = "⚠️ Извините, сейчас не удалось ответить на вопрос. Попробуйте позже."
 
     try:
         await message.bot.edit_message_text(
@@ -327,7 +387,7 @@ async def _answer_question_message(message: Message, question: str) -> None:
 
 async def _send_top_news_message(message: Message, topic: str | None) -> None:
     status_message = await message.answer(
-        "Собираю топ-5 новостей. Пожалуйста, подождите."
+        "📰 Собираю топ-5 новостей. Пожалуйста, подождите."
     )
     try:
         items = await asyncio.to_thread(fetch_top_news, topic, 5)
@@ -337,7 +397,7 @@ async def _send_top_news_message(message: Message, topic: str | None) -> None:
 
     if not items:
         await message.bot.edit_message_text(
-            text="Не удалось получить новости по теме. Попробуйте позже.",
+            text="⚠️ Не удалось получить новости по теме. Попробуйте позже.",
             chat_id=message.chat.id,
             message_id=status_message.message_id,
         )
@@ -357,14 +417,14 @@ async def _send_top_news_message(message: Message, topic: str | None) -> None:
 async def handle_question(message: Message) -> None:
     user = message.from_user
     if not user:
-        await message.answer("Не удалось определить пользователя.")
+        await message.answer("⚠️ Не удалось определить пользователя.")
         return
 
     clear_state(user.id)
     last_news = get_last_news(user.id)
     if not last_news:
         await message.answer(
-            "Сначала отправьте новость для проверки — "
+            "⚠️ Сначала отправьте новость для проверки — "
             "тогда я смогу отвечать на вопросы по ней.",
             reply_markup=_main_keyboard(),
         )
@@ -372,7 +432,7 @@ async def handle_question(message: Message) -> None:
 
     set_state(user.id, STATE_AWAITING_QUESTION)
     await message.answer(
-        "Напишите вопрос по последней новости.",
+        "❓ Напишите вопрос по последней новости.",
         reply_markup=_main_keyboard(),
     )
 
@@ -383,7 +443,7 @@ async def handle_top_news(message: Message) -> None:
         clear_state(user.id)
         set_state(user.id, STATE_AWAITING_TOPIC)
     await message.answer(
-        "Напишите тему для топ-5 новостей. "
+        "📰 Напишите тему для топ-5 новостей. "
         "Если нужна подборка без темы — отправьте «без темы».",
         reply_markup=_main_keyboard(),
     )
@@ -392,23 +452,23 @@ async def handle_top_news(message: Message) -> None:
 async def handle_subscribe(message: Message) -> None:
     user = message.from_user
     if not user:
-        await message.answer("Не удалось определить пользователя.")
+        await message.answer("⚠️ Не удалось определить пользователя.")
         return
 
     clear_state(user.id)
     now = datetime.now(timezone.utc)
     active_until = _get_active_subscription(user.id, now)
     status_line = (
-        f"Текущая подписка активна до {_format_date(active_until)}."
+        f"✅ Текущая подписка активна до {_format_date(active_until)}."
         if active_until
-        else "Подписка активируется сразу после оплаты."
+        else "💳 Подписка активируется сразу после оплаты."
     )
 
     await message.answer(
-        "Подписка на месяц: безлимитная проверка новостей.\n"
-        f"Цена: {config.subscription_stars} ⭐️.\n"
-        f"Срок: {config.subscription_days} дней.\n"
-        f"Лимит без подписки: {config.daily_limit} новостей в день.\n"
+        "⭐ Подписка на месяц: безлимитная проверка новостей.\n"
+        f"💰 Цена: {config.subscription_stars} ⭐️.\n"
+        f"📆 Срок: {config.subscription_days} дней.\n"
+        f"📊 Лимит без подписки: {config.daily_limit} новостей в день.\n"
         f"{status_line}",
         reply_markup=_main_keyboard(),
     )
@@ -420,7 +480,7 @@ async def handle_subscribe(message: Message) -> None:
         )
     ]
     await message.answer_invoice(
-        title="Подписка на месяц",
+        title="⭐ Подписка на месяц",
         description=f"Безлимитная проверка новостей на {config.subscription_days} дней.",
         payload=SUBSCRIPTION_PAYLOAD,
         currency="XTR",
@@ -430,7 +490,7 @@ async def handle_subscribe(message: Message) -> None:
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text=f"Оплатить {config.subscription_stars} ⭐️",
+                        text=f"💳 Оплатить {config.subscription_stars} ⭐️",
                         pay=True,
                     )
                 ]
@@ -441,7 +501,7 @@ async def handle_subscribe(message: Message) -> None:
 
 async def handle_pre_checkout(query: PreCheckoutQuery) -> None:
     if query.invoice_payload != SUBSCRIPTION_PAYLOAD:
-        await query.answer(ok=False, error_message="Платеж не распознан.")
+        await query.answer(ok=False, error_message="⚠️ Платеж не распознан.")
         return
     await query.answer(ok=True)
 
@@ -461,7 +521,7 @@ async def handle_successful_payment(message: Message) -> None:
 
     user = message.from_user
     if not user:
-        await message.answer("Не удалось определить пользователя.")
+        await message.answer("⚠️ Не удалось определить пользователя.")
         return
 
     now = datetime.now(timezone.utc)
@@ -471,7 +531,7 @@ async def handle_successful_payment(message: Message) -> None:
     set_subscription(user.id, new_expires)
 
     await message.answer(
-        f"Оплата получена. Подписка активна до {_format_date(new_expires)}.",
+        f"✅ Оплата получена. Подписка активна до {_format_date(new_expires)}.",
         reply_markup=_main_keyboard(),
     )
 
@@ -483,39 +543,51 @@ async def handle_any(message: Message) -> None:
         stripped = message.text.strip()
         if stripped in BUTTON_TEXTS:
             return
-        lowered = stripped.casefold()
-        if lowered == "вопрос":
+        normalized = _normalize_trigger(stripped)
+        if normalized in QUESTION_TRIGGERS:
             await handle_question(message)
             return
-        if lowered in {"топ новости", "топ"}:
+        if normalized in TOP_TRIGGERS:
             await handle_top_news(message)
             return
-        if lowered == "подписка":
+        if normalized in SUBSCRIBE_TRIGGERS:
             await handle_subscribe(message)
             return
-        if lowered == "проверка":
+        if normalized in CHECK_TRIGGERS:
             await handle_check(message)
             return
-        if lowered == "помощь":
+        if normalized in HELP_TRIGGERS:
             await handle_help(message)
             return
-        if lowered == "о боте":
+        if normalized in ABOUT_TRIGGERS:
             await handle_about(message)
             return
-        if lowered == "старт":
+        if normalized in START_TRIGGERS:
             await handle_start(message)
+            return
+        if normalized in MENU_TRIGGERS:
+            await handle_menu(message)
             return
 
     user = message.from_user
 
     if message.text and message.text.startswith("/"):
         command = message.text.split()[0].lower()
-        if command in {"/start", "/help", "/about", "/check", "/subscribe", "/top", "/question"}:
+        if command in {
+            "/start",
+            "/help",
+            "/about",
+            "/check",
+            "/subscribe",
+            "/top",
+            "/question",
+            "/menu",
+        }:
             return
         if user:
             clear_state(user.id)
         await message.answer(
-            "Отправьте текст новости для проверки.",
+            "📝 Отправьте текст новости для проверки.",
             reply_markup=_main_keyboard(),
         )
         return
@@ -540,7 +612,7 @@ async def handle_any(message: Message) -> None:
 
     if _is_too_short(text):
         await message.answer(
-            "Пожалуйста, отправьте текст новости (минимум 4 слова) "
+            "⚠️ Пожалуйста, отправьте текст новости (минимум 4 слова) "
             "или подпись к пересланному сообщению.",
             reply_markup=_main_keyboard(),
         )
@@ -548,7 +620,7 @@ async def handle_any(message: Message) -> None:
 
     if not user:
         await message.answer(
-            "Не удалось определить пользователя. Попробуйте еще раз.",
+            "⚠️ Не удалось определить пользователя. Попробуйте еще раз.",
             reply_markup=_main_keyboard(),
         )
         return
@@ -560,7 +632,7 @@ async def handle_any(message: Message) -> None:
         used = get_usage_count(user.id, day_key)
         if used >= config.daily_limit:
             await message.answer(
-                "Достигнут дневной лимит проверок.\n\n"
+                "⚠️ Достигнут дневной лимит проверок.\n\n"
                 f"{_subscription_info()}",
                 reply_markup=_main_keyboard(),
             )
@@ -569,7 +641,7 @@ async def handle_any(message: Message) -> None:
 
     set_last_news(user.id, text)
     status_message = await message.answer(
-        "Проверяю новость. Пожалуйста, подождите, ответ формируется."
+        "🔎 Проверяю новость. Пожалуйста, подождите, ответ формируется."
     )
     task = asyncio.create_task(
         _analyze_and_respond(
@@ -590,6 +662,23 @@ def _build_webhook_url(base_url: str, path: str) -> str:
 
 async def _healthcheck(_: web.Request) -> web.Response:
     return web.Response(text="ok")
+
+
+async def _set_bot_commands(bot: Bot) -> None:
+    commands = [
+        BotCommand(command="start", description="▶️ Старт и приветствие"),
+        BotCommand(command="check", description="✅ Проверка новости"),
+        BotCommand(command="question", description="❓ Вопрос по последней новости"),
+        BotCommand(command="top", description="📰 Топ-5 новостей по теме"),
+        BotCommand(command="subscribe", description="⭐ Подписка и лимиты"),
+        BotCommand(command="help", description="🆘 Помощь"),
+        BotCommand(command="about", description="ℹ️ О боте"),
+        BotCommand(command="menu", description="📋 Меню разделов"),
+    ]
+    try:
+        await bot.set_my_commands(commands)
+    except Exception:
+        logger.exception("Failed to set bot commands")
 
 
 async def _run_polling(bot: Bot, dp: Dispatcher) -> None:
@@ -651,20 +740,30 @@ async def main() -> None:
     bot = Bot(token=config.telegram_bot_token)
     dp = Dispatcher()
 
+    await _set_bot_commands(bot)
+
     dp.message.register(handle_start, CommandStart())
     dp.message.register(handle_start, F.text == "Старт")
+    dp.message.register(handle_start, F.text == BUTTON_START)
+    dp.message.register(handle_menu, Command("menu"))
     dp.message.register(handle_help, Command("help"))
     dp.message.register(handle_help, F.text == "Помощь")
+    dp.message.register(handle_help, F.text == BUTTON_HELP)
     dp.message.register(handle_about, Command("about"))
     dp.message.register(handle_about, F.text == "О боте")
+    dp.message.register(handle_about, F.text == BUTTON_ABOUT)
     dp.message.register(handle_check, Command("check"))
     dp.message.register(handle_check, F.text == "Проверка")
+    dp.message.register(handle_check, F.text == BUTTON_CHECK)
     dp.message.register(handle_question, Command("question"))
     dp.message.register(handle_question, F.text == "Вопрос")
+    dp.message.register(handle_question, F.text == BUTTON_QUESTION)
     dp.message.register(handle_top_news, Command("top"))
     dp.message.register(handle_top_news, F.text == "Топ новости")
+    dp.message.register(handle_top_news, F.text == BUTTON_TOP)
     dp.message.register(handle_subscribe, Command("subscribe"))
     dp.message.register(handle_subscribe, F.text == "Подписка")
+    dp.message.register(handle_subscribe, F.text == BUTTON_SUBSCRIBE)
     dp.pre_checkout_query.register(handle_pre_checkout)
     dp.message.register(handle_successful_payment, F.successful_payment)
     dp.message.register(handle_any)
