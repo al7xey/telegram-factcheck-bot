@@ -22,8 +22,6 @@ VERDICT_MAP = {
     "Скорее правда": "Скорее правда",
 }
 
-ALLOWED_VERDICTS = set(VERDICT_MAP.keys())
-
 
 @dataclass
 class FactCheckResult:
@@ -106,22 +104,45 @@ def _build_assumption_prompt(news_text: str, question: str) -> str:
 # JSON PARSING
 # =========================
 
-def _extract_json(text: str) -> dict[str, Any] | None:
+def _strip_code_fence(text: str) -> str:
+    if "```" not in text:
+        return text
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return text
 
+
+def _try_decode_json(text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
     try:
-        return json.loads(text)
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            return payload
     except Exception:
         pass
 
-    match = re.search(r"\{[\s\S]*?\}", text)
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            payload, _end = decoder.raw_decode(text[match.start() :])
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
 
-    if not match:
-        return None
 
-    try:
-        return json.loads(match.group())
-    except Exception:
+def _extract_json(text: str) -> dict[str, Any] | None:
+    cleaned = text.strip()
+    if not cleaned:
         return None
+    for candidate in (cleaned, _strip_code_fence(cleaned)):
+        payload = _try_decode_json(candidate)
+        if payload is not None:
+            return payload
+    return None
 
 
 # =========================
@@ -241,7 +262,7 @@ def _parse_question_payload(text: str) -> QuestionAnswer | None:
         _normalize_list(payload.get("sources"))
     )
 
-    if found and not answer:
+    if found and (not answer or _looks_like_no_answer(answer)):
         found = False
 
     return QuestionAnswer(
@@ -340,7 +361,10 @@ def answer_question(news_text: str, question: str) -> str:
     # NEWS SEARCH
     # =====================
 
-    search_query = news_text[:200]
+    cleaned_question = question.strip()
+    search_query = (
+        cleaned_question if len(cleaned_question) >= 8 else news_text[:200]
+    )
 
     try:
         items = fetch_top_news(search_query, limit=3)
@@ -359,7 +383,11 @@ def answer_question(news_text: str, question: str) -> str:
 
         search_payload = _parse_question_payload(search_response)
 
-        if search_payload and search_payload.answer:
+        if (
+            search_payload
+            and search_payload.found
+            and search_payload.answer
+        ):
 
             sources = search_payload.sources
 

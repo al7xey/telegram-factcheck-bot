@@ -165,7 +165,11 @@ def fetch_top_news(topic: str | None, limit: int = 5) -> list[NewsItem]:
     for item in _iter_items(root):
         title = _clean_text(item.findtext("title"))
         link = _clean_text(item.findtext("link"))
-        link = normalize_direct_link(link) if link else None
+        if link:
+            direct = normalize_direct_link(link)
+            link = direct or (link if _is_http_url(link) else None)
+        else:
+            link = None
         source = _clean_text(item.findtext("source"))
         description = _clean_text(item.findtext("description"))
 
