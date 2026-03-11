@@ -217,6 +217,19 @@ def _normalize_free_text(text: str) -> str:
     return " ".join(cleaned.casefold().split())
 
 
+def _contains_url(text: str) -> bool:
+    return bool(re.search(r"(https?://|www\.)", text, re.IGNORECASE))
+
+
+def _is_short_message(text: str) -> bool:
+    normalized = _normalize_free_text(text)
+    if not normalized:
+        return False
+    if len(normalized) > 60:
+        return False
+    return len(normalized.split()) <= 3
+
+
 def _looks_like_greeting(text: str) -> bool:
     normalized = _normalize_free_text(text)
     if not normalized:
@@ -224,7 +237,9 @@ def _looks_like_greeting(text: str) -> bool:
     if normalized in GREETING_TRIGGERS:
         return True
     words = normalized.split()
-    return any(word in GREETING_TRIGGERS for word in words)
+    if len(words) > 2:
+        return False
+    return all(word in GREETING_TRIGGERS for word in words)
 
 
 def _looks_like_smalltalk(text: str) -> bool:
@@ -242,7 +257,7 @@ def _section_banner(state_name: str | None) -> str:
     title = SECTION_TITLES.get(state_name)
     if not title:
         return ""
-    return f"🧭 Сейчас вы в разделе: {title}."
+    return f"Сейчас вы в разделе: {title}."
 
 
 def _with_section_banner(text: str, state_name: str | None) -> str:
@@ -723,7 +738,12 @@ async def handle_any(message: Message) -> None:
         await _answer_question_message(message, question)
         return
 
-    if user and (_looks_like_greeting(text) or _looks_like_smalltalk(text)):
+    if (
+        user
+        and _is_short_message(text)
+        and not _contains_url(text)
+        and (_looks_like_greeting(text) or _looks_like_smalltalk(text))
+    ):
         await message.answer(
             "Привет! Чем могу помочь?\n"
             "✅ Проверка новости\n"
