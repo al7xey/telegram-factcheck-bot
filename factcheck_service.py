@@ -51,6 +51,19 @@ def _build_prompt(news_text: str) -> str:
     )
 
 
+def _build_question_prompt(news_text: str, question: str) -> str:
+    return (
+        "Ты помощник по новостям. Ответь на вопрос пользователя, "
+        "используя только текст новости ниже. Не выдумывай фактов.\n"
+        "Если в новости нет ответа, так и скажи и уточни, чего не хватает.\n"
+        "Ответ — кратко, 3-6 предложений.\n\n"
+        "Текст новости:\n"
+        f"{news_text}\n\n"
+        "Вопрос пользователя:\n"
+        f"{question}"
+    )
+
+
 def _extract_json(text: str) -> dict[str, Any] | None:
     try:
         return json.loads(text)
@@ -148,3 +161,15 @@ def analyze_news(news_text: str) -> FactCheckResult:
         sources=sources,
         raw_response=response_text,
     )
+
+
+def answer_question(news_text: str, question: str) -> str:
+    """Answer a user's question about the provided news text."""
+    prompt = _build_question_prompt(news_text, question)
+
+    try:
+        response_text = send_prompt_to_gigachat(prompt)
+    except GigaChatError as exc:
+        raise RuntimeError(f"GigaChat request failed: {exc}") from exc
+
+    return response_text.strip()

@@ -27,6 +27,10 @@ class Config:
     request_timeout: int
     min_text_chars: int
     min_text_words: int
+    daily_limit: int
+    subscription_stars: int
+    subscription_days: int
+    payment_provider_token: str
     verify_ssl: bool
     ca_bundle_path: str | None
     webhook_base_url: str | None
@@ -34,6 +38,7 @@ class Config:
     webhook_secret: str | None
     webhook_host: str
     webhook_port: int
+    db_path: str
 
 
 def _get_int(name: str, default: int) -> int:
@@ -105,7 +110,11 @@ def load_config() -> Config:
         gigachat_top_p=_get_float("GIGACHAT_TOP_P", 0.8),
         request_timeout=_get_int("REQUEST_TIMEOUT", 45),
         min_text_chars=_get_int("MIN_TEXT_CHARS", 30),
-        min_text_words=_get_int("MIN_TEXT_WORDS", 6),
+        min_text_words=_get_int("MIN_TEXT_WORDS", 4),
+        daily_limit=_get_int("DAILY_LIMIT", 5),
+        subscription_stars=_get_int("SUBSCRIPTION_STARS", 50),
+        subscription_days=_get_int("SUBSCRIPTION_DAYS", 30),
+        payment_provider_token=os.getenv("PAYMENT_PROVIDER_TOKEN", "").strip(),
         verify_ssl=_get_bool("GIGACHAT_VERIFY_SSL", True),
         ca_bundle_path=os.getenv("GIGACHAT_CA_BUNDLE", "").strip() or None,
         webhook_base_url=webhook_base_url,
@@ -113,6 +122,7 @@ def load_config() -> Config:
         webhook_secret=webhook_secret,
         webhook_host=webhook_host,
         webhook_port=webhook_port,
+        db_path=os.getenv("DB_PATH", "bot.db").strip() or "bot.db",
     )
 
 

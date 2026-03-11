@@ -5,17 +5,40 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 
 from aiohttp import web
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+    ReplyKeyboardMarkup,
+)
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
 from config import config
-from factcheck_service import FactCheckResult, analyze_news
+from factcheck_service import FactCheckResult, analyze_news, answer_question
+from news_service import NewsItem, fetch_top_news
+from storage import (
+    clear_state,
+    delete_subscription,
+    get_last_news,
+    get_subscription_expires_at,
+    get_state,
+    get_usage_count,
+    increment_usage,
+    init_db,
+    set_last_news,
+    set_state,
+    set_subscription,
+)
 
 
 LOG_PATH = os.getenv("LOG_PATH", "bot.log")
@@ -35,10 +58,24 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 BACKGROUND_TASKS: set[asyncio.Task] = set()
 
+SUBSCRIPTION_PAYLOAD = "subscription_month_unlimited_v1"
+STATE_AWAITING_QUESTION = "awaiting_question"
+STATE_AWAITING_TOPIC = "awaiting_topic"
+BUTTON_TEXTS = {
+    "Проверка",
+    "Подписка",
+    "Помощь",
+    "О боте",
+    "Вопрос",
+    "Топ новости",
+    "Старт",
+}
+
 
 def _is_too_short(text: str) -> bool:
     words = [word for word in text.split() if word.strip()]
-    return len(text.strip()) < config.min_text_chars or len(words) < config.min_text_words
+    min_words = min(config.min_text_words, 4)
+    return len(words) < min_words
 
 
 def _format_result(result: FactCheckResult) -> str:
@@ -62,14 +99,82 @@ def _format_result(result: FactCheckResult) -> str:
     )
 
 
+def _subscription_info() -> str:
+    return (
+        f"Лимит без подписки: {config.daily_limit} новостей в день.\n"
+        f"Подписка: {config.subscription_stars} ⭐️ на {config.subscription_days} дней безлимита "
+        "(кнопка «Подписка»)."
+    )
+
+
+def _format_date(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%d.%m.%Y")
+
+
+def _get_active_subscription(user_id: int, now: datetime) -> datetime | None:
+    expires_at = get_subscription_expires_at(user_id)
+    if not expires_at:
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
+        delete_subscription(user_id)
+        return None
+    return expires_at
+
+
+def _today_key(now: datetime) -> str:
+    return now.date().isoformat()
+
+
+def _normalize_topic(text: str) -> str | None:
+    raw = text.strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered in {"без темы", "без", "любые", "любой", "все новости", "топ", "топ новости"}:
+        return None
+    return raw
+
+
+def _extract_question(text: str) -> str | None:
+    raw = text.strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    for prefix in ("вопрос:", "вопрос -", "вопрос "):
+        if lowered.startswith(prefix):
+            return raw[len(prefix) :].strip()
+    if raw.startswith("?"):
+        return raw.lstrip("?").strip()
+    return None
+
+
+def _format_news_items(items: list[NewsItem], topic: str | None) -> str:
+    header = "Топ-5 новостей"
+    if topic:
+        header = f"{header} по теме: {topic}"
+    lines = [header, ""]
+    for idx, item in enumerate(items, start=1):
+        lines.append(f"{idx}. {item.title}")
+        if item.summary:
+            lines.append(item.summary)
+        if item.source:
+            lines.append(f"Источник: {item.source}")
+        lines.append(item.link)
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def _main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="/check"), KeyboardButton(text="/help")],
-            [KeyboardButton(text="/about"), KeyboardButton(text="/start")],
+            [KeyboardButton(text="Проверка"), KeyboardButton(text="Подписка")],
+            [KeyboardButton(text="Вопрос"), KeyboardButton(text="Топ новости")],
+            [KeyboardButton(text="Помощь"), KeyboardButton(text="О боте")],
         ],
         resize_keyboard=True,
-        input_field_placeholder="Введите новость или выберите команду",
+        input_field_placeholder="Введите новость, вопрос или тему",
     )
 
 
@@ -116,39 +221,257 @@ async def _analyze_and_respond(
 
 
 async def handle_start(message: Message) -> None:
+    if message.from_user:
+        clear_state(message.from_user.id)
     await message.answer(
         "Привет! 👋\n\n"
         "Я бот для проверки новостей.\n\n"
         "Просто перешли мне сообщение, новость или ссылку — "
-        "я проанализирую её и покажу результат проверки и источники.",
+        "я проанализирую её и покажу результат проверки и источники.\n\n"
+        "Можно задать вопрос по последней новости (кнопка «Вопрос»).\n"
+        "Также доступен «Топ новости» — отправь тему и получишь подборку.\n\n"
+        f"{_subscription_info()}\n\n"
+        "Если бот долго не отвечает, подождите до 50 секунд — "
+        "иногда требуется время на запуск.",
         reply_markup=_main_keyboard(),
     )
 
 
 async def handle_help(message: Message) -> None:
+    if message.from_user:
+        clear_state(message.from_user.id)
     await message.answer(
         "Как пользоваться ботом:\n\n"
         "1️⃣ Перешли новость или сообщение\n"
         "2️⃣ Отправь ссылку на статью\n"
         "3️⃣ Напиши текст, который хочешь проверить\n\n"
-        "Бот проанализирует информацию и покажет результат проверки.",
+        "Бот проанализирует информацию и покажет результат проверки.\n\n"
+        "Вопрос по последней новости — кнопка «Вопрос».\n"
+        "Подборка по теме — кнопка «Топ новости».\n\n"
+        f"{_subscription_info()}\n\n"
+        "Если бот долго не отвечает, подожди до 50 секунд — "
+        "иногда требуется время на запуск.",
         reply_markup=_main_keyboard(),
     )
 
 
 async def handle_about(message: Message) -> None:
+    if message.from_user:
+        clear_state(message.from_user.id)
     await message.answer(
         "Этот бот анализирует новости и сообщения, "
         "чтобы определить их достоверность.\n\n"
-        "Отправь текст или ссылку — и бот проверит информацию.",
+        "Отправь текст или ссылку — и бот проверит информацию.\n\n"
+        "Можно задать вопрос по последней новости и получить подборку "
+        "«Топ новости» по интересующей теме.\n\n"
+        f"{_subscription_info()}\n\n"
+        "Если бот долго не отвечает, подожди до 50 секунд — "
+        "иногда требуется время на запуск.",
         reply_markup=_main_keyboard(),
     )
 
 
 async def handle_check(message: Message) -> None:
+    if message.from_user:
+        clear_state(message.from_user.id)
     await message.answer(
         "Отправь новость, сообщение или ссылку — "
-        "я попробую проверить её достоверность.",
+        "я попробую проверить её достоверность.\n\n"
+        "После проверки можно задать вопрос по этой новости.",
+        reply_markup=_main_keyboard(),
+    )
+
+
+async def _answer_question_message(message: Message, question: str) -> None:
+    user = message.from_user
+    if not user:
+        await message.answer("Не удалось определить пользователя.")
+        return
+
+    cleaned = question.strip()
+    if len(cleaned) < 3:
+        set_state(user.id, STATE_AWAITING_QUESTION)
+        await message.answer(
+            "Сформулируйте вопрос чуть подробнее.",
+            reply_markup=_main_keyboard(),
+        )
+        return
+
+    last_news = get_last_news(user.id)
+    if not last_news:
+        await message.answer(
+            "Сначала отправьте новость для проверки — "
+            "тогда я смогу отвечать на вопросы по ней.",
+            reply_markup=_main_keyboard(),
+        )
+        return
+
+    status_message = await message.answer(
+        "Отвечаю на вопрос по последней новости. Пожалуйста, подождите."
+    )
+    try:
+        answer = await asyncio.to_thread(answer_question, last_news, cleaned)
+    except Exception:
+        logger.exception("Question answering failed")
+        answer = "Извините, сейчас не удалось ответить на вопрос. Попробуйте позже."
+
+    try:
+        await message.bot.edit_message_text(
+            text=answer,
+            chat_id=message.chat.id,
+            message_id=status_message.message_id,
+        )
+    except TelegramBadRequest:
+        await message.answer(answer, reply_markup=_main_keyboard())
+
+
+async def _send_top_news_message(message: Message, topic: str | None) -> None:
+    status_message = await message.answer(
+        "Собираю топ-5 новостей. Пожалуйста, подождите."
+    )
+    try:
+        items = await asyncio.to_thread(fetch_top_news, topic, 5)
+    except Exception:
+        logger.exception("Top news fetch failed")
+        items = []
+
+    if not items:
+        await message.bot.edit_message_text(
+            text="Не удалось получить новости по теме. Попробуйте позже.",
+            chat_id=message.chat.id,
+            message_id=status_message.message_id,
+        )
+        return
+
+    text = _format_news_items(items, topic)
+    try:
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=message.chat.id,
+            message_id=status_message.message_id,
+        )
+    except TelegramBadRequest:
+        await message.answer(text, reply_markup=_main_keyboard())
+
+
+async def handle_question(message: Message) -> None:
+    user = message.from_user
+    if not user:
+        await message.answer("Не удалось определить пользователя.")
+        return
+
+    clear_state(user.id)
+    last_news = get_last_news(user.id)
+    if not last_news:
+        await message.answer(
+            "Сначала отправьте новость для проверки — "
+            "тогда я смогу отвечать на вопросы по ней.",
+            reply_markup=_main_keyboard(),
+        )
+        return
+
+    set_state(user.id, STATE_AWAITING_QUESTION)
+    await message.answer(
+        "Напишите вопрос по последней новости.",
+        reply_markup=_main_keyboard(),
+    )
+
+
+async def handle_top_news(message: Message) -> None:
+    user = message.from_user
+    if user:
+        clear_state(user.id)
+        set_state(user.id, STATE_AWAITING_TOPIC)
+    await message.answer(
+        "Напишите тему для топ-5 новостей. "
+        "Если нужна подборка без темы — отправьте «без темы».",
+        reply_markup=_main_keyboard(),
+    )
+
+
+async def handle_subscribe(message: Message) -> None:
+    user = message.from_user
+    if not user:
+        await message.answer("Не удалось определить пользователя.")
+        return
+
+    clear_state(user.id)
+    now = datetime.now(timezone.utc)
+    active_until = _get_active_subscription(user.id, now)
+    status_line = (
+        f"Текущая подписка активна до {_format_date(active_until)}."
+        if active_until
+        else "Подписка активируется сразу после оплаты."
+    )
+
+    await message.answer(
+        "Подписка на месяц: безлимитная проверка новостей.\n"
+        f"Цена: {config.subscription_stars} ⭐️.\n"
+        f"Срок: {config.subscription_days} дней.\n"
+        f"Лимит без подписки: {config.daily_limit} новостей в день.\n"
+        f"{status_line}",
+        reply_markup=_main_keyboard(),
+    )
+
+    prices = [
+        LabeledPrice(
+            label="Подписка на месяц",
+            amount=config.subscription_stars,
+        )
+    ]
+    await message.answer_invoice(
+        title="Подписка на месяц",
+        description=f"Безлимитная проверка новостей на {config.subscription_days} дней.",
+        payload=SUBSCRIPTION_PAYLOAD,
+        currency="XTR",
+        prices=prices,
+        provider_token=config.payment_provider_token,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"Оплатить {config.subscription_stars} ⭐️",
+                        pay=True,
+                    )
+                ]
+            ]
+        ),
+    )
+
+
+async def handle_pre_checkout(query: PreCheckoutQuery) -> None:
+    if query.invoice_payload != SUBSCRIPTION_PAYLOAD:
+        await query.answer(ok=False, error_message="Платеж не распознан.")
+        return
+    await query.answer(ok=True)
+
+
+async def handle_successful_payment(message: Message) -> None:
+    payment = message.successful_payment
+    if not payment:
+        return
+
+    if payment.invoice_payload != SUBSCRIPTION_PAYLOAD:
+        logger.warning("Unexpected payment payload: %s", payment.invoice_payload)
+        return
+
+    if payment.currency != "XTR":
+        logger.warning("Unexpected payment currency: %s", payment.currency)
+        return
+
+    user = message.from_user
+    if not user:
+        await message.answer("Не удалось определить пользователя.")
+        return
+
+    now = datetime.now(timezone.utc)
+    current = get_subscription_expires_at(user.id)
+    base = current if current and current > now else now
+    new_expires = base + timedelta(days=config.subscription_days)
+    set_subscription(user.id, new_expires)
+
+    await message.answer(
+        f"Оплата получена. Подписка активна до {_format_date(new_expires)}.",
         reply_markup=_main_keyboard(),
     )
 
@@ -156,23 +479,95 @@ async def handle_check(message: Message) -> None:
 async def handle_any(message: Message) -> None:
     text = _extract_text(message)
 
+    if message.text:
+        stripped = message.text.strip()
+        if stripped in BUTTON_TEXTS:
+            return
+        lowered = stripped.casefold()
+        if lowered == "вопрос":
+            await handle_question(message)
+            return
+        if lowered in {"топ новости", "топ"}:
+            await handle_top_news(message)
+            return
+        if lowered == "подписка":
+            await handle_subscribe(message)
+            return
+        if lowered == "проверка":
+            await handle_check(message)
+            return
+        if lowered == "помощь":
+            await handle_help(message)
+            return
+        if lowered == "о боте":
+            await handle_about(message)
+            return
+        if lowered == "старт":
+            await handle_start(message)
+            return
+
+    user = message.from_user
+
     if message.text and message.text.startswith("/"):
         command = message.text.split()[0].lower()
-        if command in {"/start", "/help", "/about", "/check"}:
+        if command in {"/start", "/help", "/about", "/check", "/subscribe", "/top", "/question"}:
             return
+        if user:
+            clear_state(user.id)
         await message.answer(
             "Отправьте текст новости для проверки.",
             reply_markup=_main_keyboard(),
         )
         return
 
+    if user:
+        state = get_state(user.id)
+        if state:
+            state_name, _payload = state
+            clear_state(user.id)
+            if state_name == STATE_AWAITING_QUESTION:
+                await _answer_question_message(message, text)
+                return
+            if state_name == STATE_AWAITING_TOPIC:
+                topic = _normalize_topic(text)
+                await _send_top_news_message(message, topic)
+                return
+
+    question = _extract_question(text)
+    if question:
+        await _answer_question_message(message, question)
+        return
+
     if _is_too_short(text):
         await message.answer(
-            "Пожалуйста, отправьте текст новости или подпись к пересланному сообщению.",
+            "Пожалуйста, отправьте текст новости (минимум 4 слова) "
+            "или подпись к пересланному сообщению.",
             reply_markup=_main_keyboard(),
         )
         return
 
+    if not user:
+        await message.answer(
+            "Не удалось определить пользователя. Попробуйте еще раз.",
+            reply_markup=_main_keyboard(),
+        )
+        return
+
+    now = datetime.now(timezone.utc)
+    active_until = _get_active_subscription(user.id, now)
+    if not active_until:
+        day_key = _today_key(now)
+        used = get_usage_count(user.id, day_key)
+        if used >= config.daily_limit:
+            await message.answer(
+                "Достигнут дневной лимит проверок.\n\n"
+                f"{_subscription_info()}",
+                reply_markup=_main_keyboard(),
+            )
+            return
+        increment_usage(user.id, day_key)
+
+    set_last_news(user.id, text)
     status_message = await message.answer(
         "Проверяю новость. Пожалуйста, подождите, ответ формируется."
     )
@@ -224,7 +619,7 @@ async def _run_webhook(bot: Bot, dp: Dispatcher) -> None:
             webhook_url,
             secret_token=config.webhook_secret,
             allowed_updates=dp.resolve_used_update_types(),
-            drop_pending_updates=True,
+            drop_pending_updates=False,
         )
         logger.info("Webhook set to %s", webhook_url)
 
@@ -252,13 +647,26 @@ async def _run_webhook(bot: Bot, dp: Dispatcher) -> None:
 
 
 async def main() -> None:
+    init_db()
     bot = Bot(token=config.telegram_bot_token)
     dp = Dispatcher()
 
     dp.message.register(handle_start, CommandStart())
+    dp.message.register(handle_start, F.text == "Старт")
     dp.message.register(handle_help, Command("help"))
+    dp.message.register(handle_help, F.text == "Помощь")
     dp.message.register(handle_about, Command("about"))
+    dp.message.register(handle_about, F.text == "О боте")
     dp.message.register(handle_check, Command("check"))
+    dp.message.register(handle_check, F.text == "Проверка")
+    dp.message.register(handle_question, Command("question"))
+    dp.message.register(handle_question, F.text == "Вопрос")
+    dp.message.register(handle_top_news, Command("top"))
+    dp.message.register(handle_top_news, F.text == "Топ новости")
+    dp.message.register(handle_subscribe, Command("subscribe"))
+    dp.message.register(handle_subscribe, F.text == "Подписка")
+    dp.pre_checkout_query.register(handle_pre_checkout)
+    dp.message.register(handle_successful_payment, F.successful_payment)
     dp.message.register(handle_any)
 
     if config.webhook_base_url:
