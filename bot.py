@@ -242,7 +242,7 @@ def _section_banner(state_name: str | None) -> str:
     title = SECTION_TITLES.get(state_name)
     if not title:
         return ""
-    return f"🧭 Сейчас вы в разделе: {title}."
+    return f"Сейчас вы в разделе: {title}."
 
 
 def _with_section_banner(text: str, state_name: str | None) -> str:
