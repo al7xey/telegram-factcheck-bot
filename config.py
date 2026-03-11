@@ -29,6 +29,11 @@ class Config:
     min_text_words: int
     verify_ssl: bool
     ca_bundle_path: str | None
+    webhook_base_url: str | None
+    webhook_path: str
+    webhook_secret: str | None
+    webhook_host: str
+    webhook_port: int
 
 
 def _get_int(name: str, default: int) -> int:
@@ -73,6 +78,17 @@ def load_config() -> Config:
             "GIGACHAT_API_KEY is missing in environment variables."
         )
 
+    webhook_base_url = (
+        os.getenv("WEBHOOK_BASE_URL", "").strip()
+        or os.getenv("RENDER_EXTERNAL_URL", "").strip()
+        or None
+    )
+    webhook_path = os.getenv("WEBHOOK_PATH", "/telegram/webhook").strip() or "/telegram/webhook"
+    webhook_secret = os.getenv("WEBHOOK_SECRET", "").strip() or None
+    webhook_host = os.getenv("WEBHOOK_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    render_port = _get_int("PORT", 0)
+    webhook_port = render_port or _get_int("WEBHOOK_PORT", 8080)
+
     return Config(
         telegram_bot_token=telegram_bot_token,
         gigachat_api_key=gigachat_api_key,
@@ -92,6 +108,11 @@ def load_config() -> Config:
         min_text_words=_get_int("MIN_TEXT_WORDS", 6),
         verify_ssl=_get_bool("GIGACHAT_VERIFY_SSL", True),
         ca_bundle_path=os.getenv("GIGACHAT_CA_BUNDLE", "").strip() or None,
+        webhook_base_url=webhook_base_url,
+        webhook_path=webhook_path,
+        webhook_secret=webhook_secret,
+        webhook_host=webhook_host,
+        webhook_port=webhook_port,
     )
 
 
